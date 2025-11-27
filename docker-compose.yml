@@ -1,48 +1,85 @@
-version: '3.8'
+version: '3.8'  # Docker Compose file format version
 
 networks:
-  kafka-net:
-    driver: bridge
+  kafka-net:     # Custom Docker network so containers can resolve each other by hostname
+    driver: bridge   # Standard isolated bridge network
 
 services:
   kafka1:
-    image: confluentinc/cp-kafka:7.8.0
-    hostname: kafka1
-    container_name: kafka1
+    image: confluentinc/cp-kafka:7.8.0   # Confluent Kafka image with KRaft support
+    hostname: kafka1                     # Internal hostname inside Docker network
+    container_name: kafka1               # Name of the container (visible to docker ps)
     ports:
-      - "9092:9092"   # internal (Docker containers)
-      - "9094:9094"   # external (host Spring Boot)
+      - "9092:9092"   # INTERNAL port → for other containers inside Docker
+      - "9094:9094"   # EXTERNAL port → for apps on your host (Spring Boot)
     environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_BROKER_ID: 1
-      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_NODE_ID: 1                  # Unique ID for the node (required in KRaft)
+      KAFKA_BROKER_ID: 1                # Broker ID (required for Kafka brokers)
+      KAFKA_PROCESS_ROLES: 'broker,controller'  
+        # Runs BOTH roles (single-node KRaft setup)
+
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka1:9093'
-      KAFKA_LISTENERS: 'CONTROLLER://kafka1:9093,INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094'
-      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka1:9092,EXTERNAL://localhost:9094'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT'
+        # Controller quorum definition → nodeId@host:port
+        # Only 1 voter because this is a single-node cluster
+
+      KAFKA_LISTENERS: 
+        'CONTROLLER://kafka1:9093,INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094'
+        # CONTROLLER listener → used internally by KRaft
+        # INTERNAL listener → other containers (schema registry, conduktor)
+        # EXTERNAL listener → host machine (your Spring Boot app)
+
+      KAFKA_ADVERTISED_LISTENERS:
+        'INTERNAL://kafka1:9092,EXTERNAL://localhost:9094'
+        # INTERNAL → used inside Docker network
+        # EXTERNAL → maps to host IP so Spring Boot can connect
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:
+        'CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT'
+        # Mapping listener names → security protocol
+        # All plain text for local dev
+
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+        # Defines which listener Kafka uses as the controller endpoint
+
       KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+        # Brokers communicate with each other using INTERNAL
+        # Required when multiple listeners exist
+
       CLUSTER_ID: 'EmptNWtoR4GGWx-BH6nGLQ'
+        # Static cluster ID for KRaft metadata storage
+        # Must stay stable or Kafka will refuse to start
+
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        # Internal __consumer_offsets topic replication
+        # Must be 1 for single node
+
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+        # Default replication factor for new topics
+        # Must be 1 for single node
+
       KAFKA_MIN_INSYNC_REPLICAS: 1
+        # Required number of replicas for producing
+        # Must be 1 for single node
+
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+        # Makes consumer groups start instantly
+
     volumes:
-      - ./kafka1/data:/var/lib/kafka/data
+      - ./kafka1/data:/var/lib/kafka/data   # Persist Kafka data locally
     networks:
       - kafka-net
 
   postgres:
-    image: postgres:15
+    image: postgres:15                     # PostgreSQL DB to store Conduktor metadata
     container_name: conduktor-postgres
     environment:
-      POSTGRES_USER: conduktor
-      POSTGRES_PASSWORD: conduktor
-      POSTGRES_DB: conduktor
+      POSTGRES_USER: conduktor             # DB username
+      POSTGRES_PASSWORD: conduktor         # DB password
+      POSTGRES_DB: conduktor               # DB name
     ports:
-      - "5432:5432"
+      - "5432:5432"                        # Exposes DB to host
     volumes:
-      - conduktor-pgdata:/var/lib/postgresql/data
+      - conduktor-pgdata:/var/lib/postgresql/data  # Persist DB files
     networks:
       - kafka-net
 
@@ -51,18 +88,22 @@ services:
     container_name: schema-registry
     hostname: schema-registry
     depends_on:
-      - kafka1
+      - kafka1                              # Must start after Kafka
     ports:
-      - "8088:8088"
+      - "8088:8088"                         # Schema Registry API exposed to host
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
+        # Registry hostname inside Docker
+
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8088
+        # Where the registry binds (inside the container)
 
-      # Connect Schema Registry to your KRaft Kafka broker
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "kafka1:9092"
+        # Schema registry connects to Kafka’s INTERNAL listener
 
-      # Optional but recommended for clean local dev
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC: "_schemas"
+        # Topic where schemas are stored (default: _schemas)
+
     networks:
       - kafka-net
 
@@ -73,28 +114,35 @@ services:
       - kafka1
       - postgres
       - schema-registry
+        # Conduktor must start after all dependencies
+
     ports:
-      - "8080:8080"
+      - "8080:8080"                         # Conduktor UI on localhost:8080
+
     environment:
-      # Admin user
-      CDK_ORGANIZATION_NAME: "local"
-      CDK_ADMIN_EMAIL: "admin@local.dev"
+      CDK_ORGANIZATION_NAME: "local"        # Conduktor organization name
+      CDK_ADMIN_EMAIL: "admin@local.dev"    # Default admin account
       CDK_ADMIN_PASSWORD: "admin"
       CDK_ORGANIZATION_ADMIN_EMAIL: "admin@local.dev"
 
-      # Database config (required)
-      CDK_DATABASE_URL: "postgresql://conduktor:conduktor@postgres:5432/conduktor"
+      CDK_DATABASE_URL: 
+        "postgresql://conduktor:conduktor@postgres:5432/conduktor"
+        # JDBC-style connection string to PostgreSQL
 
-      # Kafka cluster
-      CDK_CLUSTERS_0_ID: "local"
+      CDK_CLUSTERS_0_ID: "local"           
+        # Cluster ID in Conduktor (internal only)
+
       CDK_CLUSTERS_0_NAME: "Local Kafka Cluster"
+        # Display name inside the UI
+
       CDK_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka1:9092"
-      
-      # Add Schema Registry support
+        # INTERNAL listener inside Docker
+
       CDK_CLUSTERS_0_SCHEMAREGISTRY_URL: "http://schema-registry:8088"
+        # Internal (Docker-level) schema registry URL
 
     networks:
       - kafka-net
 
 volumes:
-  conduktor-pgdata:
+  conduktor-pgdata:   # Named volume for PostgreSQL persistence
